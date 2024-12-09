@@ -1,0 +1,242 @@
+import os  # For folder management
+import pandas as pd
+import re
+import openpyxl
+from openpyxl.styles import PatternFill
+from datetime import datetime
+from google.colab import files  # Import files module for Colab
+
+# Generate the current UTC time in yymmddhhmm format
+current_time = datetime.utcnow().strftime('%y%m%d%H%M')
+
+def process_data(input_text):
+    # Split the input into blocks by separating at blank lines
+    blocks = re.split(r'\n\s*\n', input_text.strip())
+
+    # Define the fields to ensure all are included
+    required_fields = ["QQQQQ", "AAAAA", "BBBBB", "CCCCC", "DDDDD", "EEEEE", "FFFFF", "GGGGG", "YYYYY", "ZZZZZ"]
+
+    processed_blocks = []
+    for block in blocks:
+        # Parse lines into a dictionary
+        lines = block.strip().split("\n")
+        data_dict = {}
+        for line in lines:
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2:
+                key, value = parts
+                data_dict[key.strip()] = value.strip()
+
+        # Ensure all required fields are present
+        for field in required_fields:
+            if field not in data_dict:
+                data_dict[field] = "*****"
+
+        # Reconstruct the block with all fields in order
+        processed_block = "\n".join(f"{field}     {data_dict[field]}" for field in required_fields)
+        processed_blocks.append(processed_block)
+
+    # Combine all processed blocks into final output
+    return "\n\n".join(processed_blocks)
+
+# Take user input for the NOTAM text
+text1 = input("Enter the NOTAM text: ")
+
+# Default header
+header = 'Q) Code  A) Area B) Start time C) End time D) Effective Time E) Details F) Base G) Top /.Q Remarks ./'
+text = header + '\n' + text1
+
+# Input for activate time with a default value
+activate_time = input(f"Enter the activate time (default NOW: {current_time}): ")
+if not activate_time:
+    activate_time = current_time
+
+# Input for FL with a default value
+fl_value = input("Enter the FL value (default: 240): ")
+if not fl_value:
+    fl_value = 240
+
+# Define the replacements with spacing
+replacements = {
+    "Q)": "\n\nQQQQQ  ",
+    "A)": "AAAAA  ",
+    "B)": "BBBBB  ",
+    "C)": "CCCCC  ",
+    "D)": "DDDDD  ",
+    "E)": "EEEEE  ",
+    "F)": "FFFFF  ",
+    "G)": "GGGGG  ",
+    "/.Q": "YYYYY  ",
+    "./": "ZZZZZ  \n\n"
+}
+
+# Replace field markers with uniform tags
+for old, new in replacements.items():
+    text = re.sub(re.escape(old), f"\n{new}  ", text)
+
+# Regular expression to keep only lines starting with the specified markers
+pattern = r"^(QQQQQ|AAAAA|BBBBB|CCCCC|DDDDD|EEEEE|FFFFF|GGGGG|YYYYY|ZZZZZ).*$"
+
+# Split text into lines and filter lines that match the pattern
+filtered_lines = [line for line in text.splitlines() if re.match(pattern, line.strip())]
+
+# Add a new line after 'ZZZZZ' if it exists
+output_text = ""
+for line in filtered_lines:
+    output_text += line + "\n"
+    if line.startswith("ZZZZZ"):
+        output_text += "\n"
+
+# Process the input
+output = process_data(output_text)
+
+# Function to split the NOTAM text into structured data
+def split_notam_text(output_text):
+    notams = []
+    for notam in output_text.strip().split("\n\n"):
+        fields = {}
+        for line in notam.split("\n"):
+            if "     " in line:
+                key, value = line.split("     ", 1)
+                fields[key.strip()] = value.strip()
+        if fields:
+            notams.append(fields)
+    return notams
+
+# Apply the function to the raw text
+notam_data = split_notam_text(output)
+
+# Create a DataFrame from the parsed data
+df = pd.DataFrame(notam_data)
+
+# Move column A (Code) to the back
+df = df[[col for col in df.columns if col != 'QQQQQ'] + ['QQQQQ']]
+
+# Replace the header row with the first row in df
+df.columns = df.iloc[0]  # Set the first row as the header
+df = df[1:].reset_index(drop=True)  # Remove the first row from data and reset the index
+
+# Split the last column using '/' as the separator
+last_column = df.columns[-1]  # Get the name of the last column
+split_columns = df[last_column].str.split("/", expand=True)
+split_columns.columns = [f"Q{last_column}_part{i+1}" for i in range(split_columns.shape[1])]
+df = pd.concat([df.drop(columns=[last_column]), split_columns], axis=1)
+
+# Generate a timestamp for the file name
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+folder_path = "./notam/"
+file_name = f"notam_data_{timestamp}.xlsx"
+full_file_path = os.path.join(folder_path, file_name)
+
+# Create the folder if it doesn't exist
+os.makedirs(folder_path, exist_ok=True)
+
+# Save the DataFrame as an Excel file
+with pd.ExcelWriter(full_file_path, engine="openpyxl") as writer:
+    df.to_excel(writer, index=False, sheet_name="NOTAMs")
+    workbook = writer.book
+    sheet = workbook["NOTAMs"]
+
+    # Apply formatting rules to specific columns
+    red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+
+
+    # Set the column width for all columns to 12
+    for col in sheet.columns:
+        col_letter = col[0].column_letter  # Get column name (e.g., 'A', 'B', etc.)
+        sheet.column_dimensions[col_letter].width = 12  # Set the width of all columns to 12
+
+    # Apply specific formatting to column 'E' (Details column)
+    sheet.column_dimensions['E'].width = 40  # Set the width of column 'E' to 40
+
+
+for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):  # Start from the second row
+    # Column 'P' (index 16)
+    col_p_value = row[15].value  # Column 'P' corresponds to index 15
+    if col_p_value:  # Ensure the cell is not empty
+        try:
+            numeric_value = float(col_p_value)  # Convert to a float
+            sheet.cell(row=row[0].row, column=16, value=numeric_value)  # Update cell with numeric value
+        except ValueError:
+            # Handle non-numeric values (set to 0 or leave blank as per requirement)
+            sheet.cell(row=row[0].row, column=16, value=0)  # Replace non-numeric with 0
+
+
+
+    # Enable word wrap and left alignment for column 'E'
+    for row in range(2, len(df) + 2):  # Starting from row 2 to skip header row
+        cell = sheet.cell(row=row, column=5)  # 'Details' is column 5
+        cell.alignment = cell.alignment.copy(wrapText=True, horizontal='left')  # Enable word wrap and left alignment
+
+    # Apply top alignment to all cells in the sheet
+    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row, min_col=1, max_col=sheet.max_column):
+        for cell in row:
+            cell.alignment = cell.alignment.copy(vertical='top')  # Set vertical alignment to top
+
+    # Highlight 'Start Time' (column C) if greater than the activate time
+    red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")  # Red fill
+
+    for row in range(2, len(df) + 2):  # Starting from row 2 to skip header row
+        cell = sheet.cell(row=row, column=2)  # 'Start Time' is column 2
+        start_time = str(cell.value).strip()
+        if start_time and len(start_time) == 10 and start_time < activate_time:
+            cell.fill = red_fill  # Apply red fill if condition is met
+
+    # Highlight 'FL' (column G) if greater than FL input or is "UNL"
+    for row in range(2, len(df) + 2):  # Starting from row 2 to skip header row
+        cell = sheet.cell(row=row, column=7)  # 'FL' is column 7
+        fl_value_cell = str(cell.value).strip()
+
+        if fl_value_cell.startswith("FL"):
+            fl_value_numeric = fl_value_cell[2:].strip()  # Remove "FL" and get numeric value
+            if fl_value_numeric.isdigit() and int(fl_value_numeric) > int(fl_value):
+                cell.fill = red_fill  # Highlight if FL > user input
+            elif fl_value_cell == "UNL":
+                cell.fill = red_fill  # Highlight if FL == "UNL"
+
+    # Set the width of column 'I' to 24
+    sheet.column_dimensions['J'].width = 12
+
+    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):  # Start from the second row
+        # Column 'K' (index 11): Remove first letter and check
+        col_k_value = row[10].value  # Column 'K' corresponds to index 10
+        if col_k_value:  # Ensure the cell is not empty
+            new_value = col_k_value[1:]  # Remove the first character
+
+            if new_value.startswith(('W', 'R')):  # Check if it starts with 'W' or 'R'
+                row[10].fill = red_fill  # Apply red fill to 'K'
+
+        # Column 'M' (index 13): Check if it starts with 'N'
+        col_m_value = row[12].value  # Column 'M' corresponds to index 12
+        if col_m_value and col_m_value.startswith('N'):
+            row[12].fill = red_fill  # Apply red fill to 'M'
+
+
+ 
+
+for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):  # Start from the second row
+    col_p_value = row[15].value  # Column 'P' corresponds to index 15 (zero-based indexing)
+
+    if col_p_value:  # Ensure the cell is not empty
+        try:
+            numeric_value = float(col_p_value)  # Convert to a numeric value
+            if numeric_value > float(fl_value):  # Compare with 240
+                row[15].fill = red_fill  # Apply red fill if the value is greater than 240
+        except ValueError:
+            continue  # Ignore non-numeric values in column 'P'
+
+    # Save the workbook
+    writer.book.save(full_file_path)
+
+# Trigger the download
+files.download(full_file_path)
+
+# Print the DataFrame to confirm
+##print(f"File saved as: {full_file_path}")
+##print(df)
+
+
+import pandas as pd
+DataframeA =pd.DataFrame (df)
+
+DataframeA
